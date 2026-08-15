@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "systemlocker-simple"
+version = "0.1.0"
+description = "Official System Locker Simple client for Python — stateless license checks over POST /auth, for software on machines you control."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/systemlocker/System-Locker-Simple-Python"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+systemlocker_simple = ["py.typed"]
