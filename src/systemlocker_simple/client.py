@@ -8,6 +8,7 @@ from enum import IntEnum
 from typing import Mapping, Sequence
 
 from .errors import ErrorKind, SimpleError, classify
+from .sso import begin_google_sso, google_sso_url
 from .transport import HTTPClient, HTTPResponse
 
 AUTH_PATH = "/auth"
@@ -176,6 +177,20 @@ class Client:
 
     def authenticate_with_password(self, username: str, password: str) -> bool:
         return self._authenticate(self.base_fields() | {"username": username, "password": password})
+
+    # ── Google SSO ────────────────────────────────────────────────
+
+    def google_sso_url(self) -> str:
+        """Return the Google SSO portal URL for the configured system."""
+        return google_sso_url(self.config.system_id)
+
+    def begin_google_sso(self) -> tuple[str, bool]:
+        """Open the Google SSO portal for the configured system.
+
+        See :func:`systemlocker_simple.sso.begin_google_sso` for the
+        ``(url, opened)`` result contract.
+        """
+        return begin_google_sso(self.config.system_id)
 
     def _authenticate(self, fields: dict[str, str]) -> bool:
         body, _ = self.request(AUTH_PATH, fields)

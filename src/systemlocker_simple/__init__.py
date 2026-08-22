@@ -19,6 +19,7 @@ from .client import (
     VariableValue,
 )
 from .errors import ErrorKind, SimpleError, classify, sso_link
+from .sso import GOOGLE_SSO_PORTAL, begin_google_sso, google_sso_url, open_url
 from .transport import HTTPClient, HTTPResponse
 
 __version__ = "0.1.0"
@@ -28,6 +29,7 @@ __all__ = [
     "Config",
     "ErrorKind",
     "Expiration",
+    "GOOGLE_SSO_PORTAL",
     "EXPIRY_ONE_DAY",
     "EXPIRY_ONE_MONTH",
     "EXPIRY_ONE_WEEK",
@@ -40,6 +42,9 @@ __all__ = [
     "ResetOutcome",
     "SimpleError",
     "VariableValue",
+    "begin_google_sso",
     "classify",
+    "google_sso_url",
+    "open_url",
     "sso_link",
 ]

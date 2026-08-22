@@ -66,6 +66,35 @@ Wraps `POST /api/v1`: key status/expiration, HWID resets (single/admin or
 whole-system), key generation, bans, expiry adjustment. Keep the API key on
 servers you control.
 
+## Google SSO (account authentication)
+
+Accounts created through Google sign-in have no local password on the
+server. A `username`/`password` check for such an account fails with an
+`sso`, `ssoexp`, or `ssowrong` reason that embeds the portal URL where the
+user completes Google sign-in and receives a system-specific password
+(valid 180 days) to use as their account password. There is no callback;
+the user transcribes the generated password into your login form and you
+simply retry.
+
+```python
+from systemlocker_simple import ErrorKind, SimpleError, open_url, sso_link
+
+try:
+    client.authenticate_with_password(username, password)
+except SimpleError as error:
+    if error.kind is ErrorKind.SSO:
+        # sso / ssoexp / ssowrong — the portal URL is embedded in the error.
+        portal = sso_link(error)
+        if not open_url(portal):
+            print(f"Finish Google sign-in at: {portal}")  # headless fallback
+        return
+    raise  # any other denial
+```
+
+You can also start the flow before any denial: `client.begin_google_sso()`
+(or `begin_google_sso(system_id)`) opens the portal and returns an
+`(url, opened)` tuple.
+
 ## Device identifiers (HWID)
 
 The library derives a hardware ID by default. To provide your own stable ID:
