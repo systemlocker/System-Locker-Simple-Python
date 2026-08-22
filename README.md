@@ -76,8 +76,11 @@ user completes Google sign-in and receives a system-specific password
 the user transcribes the generated password into your login form and you
 simply retry.
 
+Deliver the portal link to your user through your own channel (API response,
+email, chat).
+
 ```python
-from systemlocker_simple import ErrorKind, SimpleError, open_url, sso_link
+from systemlocker_simple import ErrorKind, SimpleError, sso_link
 
 try:
     client.authenticate_with_password(username, password)
@@ -85,15 +88,14 @@ except SimpleError as error:
     if error.kind is ErrorKind.SSO:
         # sso / ssoexp / ssowrong — the portal URL is embedded in the error.
         portal = sso_link(error)
-        if not open_url(portal):
-            print(f"Finish Google sign-in at: {portal}")  # headless fallback
+        send_to_user(user, portal)  # your channel: API response, email, chat…
         return
     raise  # any other denial
 ```
 
-You can also start the flow before any denial: `client.begin_google_sso()`
-(or `begin_google_sso(system_id)`) opens the portal and returns an
-`(url, opened)` tuple.
+`google_sso_url(system_id)` (or `client.google_sso_url()`) builds the same
+portal URL before any denial, if you already know the account signs in
+through Google.
 
 ## Device identifiers (HWID)
 
