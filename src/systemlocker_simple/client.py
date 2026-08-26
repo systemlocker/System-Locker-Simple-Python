@@ -23,9 +23,12 @@ class Config:
     system_id: str = ""
     version: str = ""
     hwid: str = ""
+    hwid_mode: str = "legacy"
+    sl_hwid_store: str = ""
+    sl_hwid_extra_mandatory: list[str] | None = None
     request_timeout_seconds: float = 15.0
     base_url: str = "https://systemlocker.net"
-    user_agent: str = "systemlocker-simple-python/0.1"
+    user_agent: str = "systemlocker-simple-python/0.2"
     program_digest: str | None = None
     api_key: str | None = None
 
@@ -119,7 +122,13 @@ class Client:
 
     def __init__(self, config: Config | None = None, http: HTTPClient | None = None) -> None:
         self.config = config or Config()
-        if not self.config.hwid:
+        if self.config.hwid_mode not in ("legacy", "sl-hwid"):
+            raise SimpleError(ErrorKind.CONFIGURATION, 'HWID mode must be "legacy" or "sl-hwid".')
+        # SL-HWID defers derivation to request time: the module enrolls or
+        # recovers lazily (and refreshes only after a successful check), so an
+        # eager call here would persist state for a client that never
+        # authenticates.
+        if not self.config.hwid and self.config.hwid_mode != "sl-hwid":
             try:
                 from .hwid import device_hwid
                 self.config.hwid = device_hwid()
@@ -134,6 +143,7 @@ class Client:
         self._http = http
         self._management: Management | None = None
         self._lock = threading.Lock()
+        self._slhwid_session = None
 
     @property
     def http(self) -> HTTPClient:
@@ -159,11 +169,51 @@ class Client:
             raise SimpleError(ErrorKind.TRANSPORT, message)
         return response.body.strip(), response.headers
 
+    def _prepare_slhwid(self):
+        """Recovers (or enrolls) the shared SL-HWID device identity; the
+        session is cached for the post-authentication commit."""
+        with self._lock:
+            if self._slhwid_session is not None:
+                return self._slhwid_session
+            from .slhwid import Options, prepare as slhwid_prepare
+
+            try:
+                session = slhwid_prepare(
+                    Options(
+                        store_path=self.config.sl_hwid_store,
+                        extra_mandatory=self.config.sl_hwid_extra_mandatory or [],
+                    )
+                )
+            except Exception as error:
+                raise SimpleError(ErrorKind.LOCAL_FAILURE, f"SL-HWID unavailable: {error}") from error
+            self._slhwid_session = session
+            return session
+
+    def _commit_slhwid(self) -> None:
+        """Re-centers the SL-HWID shares after the server accepted an
+        authentication. Best-effort: the next launch re-derives."""
+        with self._lock:
+            session = self._slhwid_session
+        if session is None:
+            return
+        try:
+            session.commit()
+        except Exception:
+            pass  # non-fatal by design
+
+    def _resolve_hwid(self) -> str:
+        """Returns the HWID for outgoing requests. The legacy mode (and any
+        explicit value) was already resolved at construction; "sl-hwid"
+        enrolls or recovers lazily here, on the first request."""
+        if self.config.hwid:
+            return self.config.hwid
+        return self._prepare_slhwid().hwid
+
     def base_fields(self) -> dict[str, str]:
         fields = {
             "system": self.config.system_id,
             "version": self.config.version,
-            "hwid": self.config.hwid,
+            "hwid": self._resolve_hwid(),
             "clean": "1",
         }
         if self.config.program_digest:
@@ -187,6 +237,8 @@ class Client:
     def _authenticate(self, fields: dict[str, str]) -> bool:
         body, _ = self.request(AUTH_PATH, fields)
         if body == "true":
+            # The server accepted this identity on this device.
+            self._commit_slhwid()
             return True
         raise classify(body)
 

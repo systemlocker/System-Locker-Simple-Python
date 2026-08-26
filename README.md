@@ -50,8 +50,9 @@ if not ok:
 Errors raise `SimpleError` whose `kind` separates infrastructure problems
 (`Transport`, `Server`) from license denials (`Denied` with the server's raw
 reason: `frozen`, `hwid banned`, `expired key`, …), Google-SSO cases (`SSO`,
-with `sso_link(error)` for the portal URL), and unrecognized reasons
-(`UnknownReason`, raw string carried).
+with `sso_link(error)` for the portal URL), `LOCAL_FAILURE` when an opt-in
+SL-HWID device identity cannot be produced (see below), and unrecognized
+reasons (`UnknownReason`, raw string carried).
 
 ## Management API (server-side tooling)
 
@@ -99,7 +100,7 @@ through Google.
 
 ## Device identifiers (HWID)
 
-The library derives a hardware ID by default. To provide your own stable ID:
+The default derivation is a plain hardware hash:
 
 ```python
 from systemlocker_simple.hwid import device_hwid
@@ -108,8 +109,51 @@ config.hwid = device_hwid()
 ```
 
 Derives a stable identifier from the machine GUID, hardware UUID, CPU id,
-and MAC (Windows and Linux). A developer-supplied stable value works just as
+and MAC (Windows and Linux). It stays available, but it is the weaker
+option: the hash over-fits a handful of hardware values, so swapping a disk
+or NIC — or cloning the machine into a VM — changes the HWID and forces your
+user through a device reset. A developer-supplied stable value works just as
 well. Set `config.hwid = "1"` only to explicitly disable device locking.
+
+### Fault-tolerant HWID (SL-HWID), opt-in
+
+```python
+config = Config(hwid_mode="sl-hwid")  # default is "legacy"
+```
+
+SL-HWID derives the HWID from a random key locked behind threshold secret
+sharing instead of hashing hardware directly. It is fault tolerant and cross
+platform (Windows, macOS, Linux), combines **14 hardware factors**, and any
+two of them can fail or change without changing the HWID; drifted factors
+are quietly re-absorbed after each successful authentication. The module's
+own persisted value is hard-locked, so copied state cannot stand in for
+changed hardware.
+
+Things to know before enabling it:
+
+- **The HWID changes.** SL-HWID produces a new opaque identifier, so a
+  deployment switching from the legacy hash (or a custom value) must reset
+  its claimed HWIDs once, at rollout — per key, self-service, or
+  system-wide through the management API — or users will hit `hwid`
+  mismatches.
+- **Storage is shared.** The enrollment lives in one per-machine location
+  (the registry on Windows, an application-support directory elsewhere),
+  shared by every System Locker client on the device. Configure
+  `sl_hwid_store` only when you deliberately need separate device state.
+- **Re-activation exists.** If hardware drifts past the recovery threshold,
+  requests fail with a `LOCAL_FAILURE` error and the user needs a reset.
+
+SL-HWID is the right choice for a **launcher**: a Simple-based launcher that
+opens a Bedrock-protected program reports exactly the HWID the Bedrock
+client reports, because both share the same per-machine enrollment. The key
+the user already activated in the launcher works for the protected program
+too — one device, one HWID, no `hwid` mismatch between the two.
+
+SL-HWID changes the device identifier only. It does not change what the
+Simple protocol guarantees: responses are still unsigned, so only use this
+client on machines you control.
+
+An explicit `hwid` value (including `"1"`) always wins over both modes.
 
 ## Security
 

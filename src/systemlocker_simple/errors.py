@@ -11,6 +11,7 @@ class ErrorKind(str, Enum):
     SERVER = "Server"
     DENIED = "Denied"
     SSO = "SSO"
+    LOCAL_FAILURE = "LocalFailure"
     UNKNOWN_REASON = "UnknownReason"
 
 
