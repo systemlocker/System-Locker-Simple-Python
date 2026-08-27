@@ -5,11 +5,14 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from .errors import ErrorKind, SimpleError, classify
 from .sso import google_sso_url
 from .transport import HTTPClient, HTTPResponse
+
+if TYPE_CHECKING:
+    from .invisible_folder import InvisibleFolder
 
 AUTH_PATH = "/auth"
 VARIABLE_PATH = "/auth/variable"
@@ -28,8 +31,10 @@ class Config:
     sl_hwid_extra_mandatory: list[str] | None = None
     request_timeout_seconds: float = 15.0
     base_url: str = "https://systemlocker.net"
-    user_agent: str = "systemlocker-simple-python/0.2"
+    invisible_folder_base_url: str = "https://invisiblefolder.net"
+    user_agent: str = "systemlocker-simple-python/1.0.0"
     program_digest: str | None = None
+    invisible_folder_api_key: str | None = None
     api_key: str | None = None
 
 
@@ -142,6 +147,7 @@ class Client:
             raise SimpleError(ErrorKind.CONFIGURATION, "Base URL must use HTTPS.")
         self._http = http
         self._management: Management | None = None
+        self._invisible_folder: InvisibleFolder | None = None
         self._lock = threading.Lock()
         self._slhwid_session = None
 
@@ -299,3 +305,11 @@ class Client:
             if self._management is None:
                 self._management = Management(self)
             return self._management
+
+    def invisible_folder(self) -> "InvisibleFolder":
+        """Return the Invisible Folder module (GET downloads and metadata)."""
+        with self._lock:
+            if self._invisible_folder is None:
+                from .invisible_folder import InvisibleFolder
+                self._invisible_folder = InvisibleFolder(self)
+            return self._invisible_folder

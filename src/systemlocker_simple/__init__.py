@@ -19,14 +19,22 @@ from .client import (
     VariableValue,
 )
 from .errors import ErrorKind, SimpleError, classify, sso_link
+from .invisible_folder import (
+    DownloadIfNewResult,
+    InvisibleFolder,
+    InvisibleFolderCredential,
+    InvisibleFolderFile,
+    InvisibleFolderMetadata,
+)
 from .sso import GOOGLE_SSO_PORTAL, google_sso_url
 from .transport import HTTPClient, HTTPResponse
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "Client",
     "Config",
+    "DownloadIfNewResult",
     "ErrorKind",
     "Expiration",
     "GOOGLE_SSO_PORTAL",
@@ -38,6 +46,10 @@ __all__ = [
     "EXPIRY_THREE_MONTHS",
     "HTTPClient",
     "HTTPResponse",
+    "InvisibleFolder",
+    "InvisibleFolderCredential",
+    "InvisibleFolderFile",
+    "InvisibleFolderMetadata",
     "Management",
     "ResetOutcome",
     "SimpleError",

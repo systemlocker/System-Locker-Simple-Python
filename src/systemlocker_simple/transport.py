@@ -1,4 +1,5 @@
-"""Transport layer shared by the client and the management sub-API."""
+"""Transport layer shared by the client, the management sub-API, and the
+Invisible Folder module."""
 
 from __future__ import annotations
 
@@ -22,44 +23,50 @@ class HTTPResponse:
 
 
 class HTTPClient:
-    """Override ``post_form`` to inject a fake."""
+    """Override ``post_form``/``get`` (or the whole class) to inject a fake."""
 
-    def __init__(self, timeout_seconds: float = 15.0, user_agent: str = "systemlocker-simple-python/0.1") -> None:
+    def __init__(self, timeout_seconds: float = 15.0, user_agent: str = "systemlocker-simple-python/1.0.0") -> None:
         self.timeout_seconds = timeout_seconds
         self.user_agent = user_agent
 
     def post_form(self, url: str, fields: Mapping[str, str | Sequence[str]], headers: Mapping[str, str] | None = None) -> HTTPResponse:
+        return self._execute("POST", url, form=fields, headers=headers)
+
+    def get(self, url: str, headers: Mapping[str, str] | None = None) -> HTTPResponse:
+        return self._execute("GET", url, headers=headers)
+
+    def _execute(self, method: str, url: str, form: Mapping[str, str | Sequence[str]] | None = None, headers: Mapping[str, str] | None = None) -> HTTPResponse:
         from urllib.parse import urlencode
         from urllib.request import Request, build_opener, HTTPRedirectHandler
         from urllib.error import HTTPError
 
-        pairs: list[tuple[str, str]] = []
-        for key, value in fields.items():
-            if isinstance(value, str):
-                pairs.append((key, value))
-            else:
-                pairs.extend((key, item) for item in value)
+        data = None
+        request_headers = {"User-Agent": self.user_agent}
+        for name, value in (headers or {}).items():
+            request_headers[name] = value
+        if form is not None:
+            pairs: list[tuple[str, str]] = []
+            for key, value in form.items():
+                if isinstance(value, str):
+                    pairs.append((key, value))
+                else:
+                    pairs.extend((key, item) for item in value)
+            data = urlencode(pairs).encode("utf-8")
+            request_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-        request = Request(
-            url,
-            data=urlencode(pairs).encode("utf-8"),
-            headers={
-                "User-Agent": self.user_agent,
-                "Content-Type": "application/x-www-form-urlencoded",
-                **{name: value for name, value in (headers or {}).items()},
-            },
-            method="POST",
-        )
+        request = Request(url, data=data, headers=request_headers, method=method)
+
         class NoRedirect(HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
+
         opener = build_opener(NoRedirect())
         try:
             with opener.open(request, timeout=self.timeout_seconds) as result:
-                return HTTPResponse(status=result.status, body=_read_bounded(result).decode("utf-8", "replace"), headers=dict(result.headers))
+                return HTTPResponse(status=result.status, body=_decode_body(_read_bounded(result)), headers=dict(result.headers))
         except HTTPError as http_error:
             try:
-                body = _read_bounded(http_error).decode("utf-8", "replace")
+                body = _decode_body(_read_bounded(http_error))
             except Exception:  # pragma: no cover - defensive
                 body = ""
             return HTTPResponse(status=http_error.code, body=body, headers=dict(http_error.headers or {}))
@@ -76,3 +83,10 @@ def _read_bounded(stream: object) -> bytes:
     if len(body) > limit:
         raise ValueError("response body exceeds 1 MiB limit")
     return body
+
+
+def _decode_body(raw: bytes) -> str:
+    # surrogateescape keeps non-UTF-8 bytes round-trippable: text responses
+    # are unaffected, and binary Invisible Folder downloads can be encoded
+    # back to the exact original bytes.
+    return raw.decode("utf-8", "surrogateescape")
