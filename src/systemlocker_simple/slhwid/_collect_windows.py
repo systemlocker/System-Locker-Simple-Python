@@ -1,5 +1,5 @@
 """Windows §4A.1 factor collection: native registry reads, environment,
-ctypes for the memory total, and best-effort wmic for disk serials. Every
+ctypes for firmware, volume, and memory details, plus CIM enrichment. Every
 source degrades gracefully — a missing source just leaves the slot absent,
 which the threshold scheme absorbs."""
 
@@ -45,16 +45,25 @@ def _reg_subkeys(path: str) -> list[str]:
 
 def _run(command: list[str], timeout: float = 4.0) -> str:
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=timeout,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
+        stdout, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Popen's timeout only terminates its direct child. CIM providers can
+        # spawn descendants, so terminate the Windows process tree as well.
+        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=2, creationflags=subprocess.CREATE_NO_WINDOW)
+        process.communicate()
+        return ""
     except (OSError, subprocess.SubprocessError):
         return ""
-    return result.stdout if result.returncode == 0 else ""
+    return stdout[:1024 * 1024] if process.returncode == 0 else ""
 
 
 def _mac_address() -> str:
@@ -87,9 +96,36 @@ def _ram_total() -> str:
 
 def _volume_serial() -> str:
     drive = os.environ.get("SystemDrive", "C:")
-    output = _run(["cmd", "/c", "vol", drive])
-    matches = re.findall(r"([0-9A-Fa-f]{4}-[0-9A-Fa-f]{4})", output)
-    return matches[-1] if matches else ""
+    serial = ctypes.c_ulong()
+    if ctypes.windll.kernel32.GetVolumeInformationW(drive + "\\", None, 0, ctypes.byref(serial), None, None, None, 0):
+        return f"{serial.value >> 16:04X}-{serial.value & 0xFFFF:04X}"
+    return ""
+
+
+def _system_uuid() -> str:
+    """Return SMBIOS Type-1 UUID directly, never ComputerHardwareId."""
+    signature = int.from_bytes(b"RSMB", "little")
+    kernel32 = ctypes.windll.kernel32
+    size = kernel32.GetSystemFirmwareTable(signature, 0, None, 0)
+    if not size or size > 1024 * 1024:
+        return ""
+    data = (ctypes.c_ubyte * size)()
+    if kernel32.GetSystemFirmwareTable(signature, 0, data, size) != size or size < 8:
+        return ""
+    table, offset = bytes(data)[8:], 0
+    while offset + 4 <= len(table):
+        kind, length = table[offset], table[offset + 1]
+        if length < 4 or offset + length > len(table):
+            return ""
+        if kind == 1 and length >= 24:
+            raw = table[offset + 8:offset + 24]
+            ordered = raw[3::-1] + raw[5:3:-1] + raw[7:5:-1] + raw[8:]
+            return str(uuid.UUID(bytes=ordered)) if any(ordered) and ordered != b"\xff" * 16 else ""
+        offset += length
+        while offset + 1 < len(table) and table[offset:offset + 2] != b"\0\0":
+            offset += 1
+        offset += 2
+    return ""
 
 
 def _multi_instance(values: list[str]) -> str:
@@ -100,7 +136,7 @@ def _multi_instance(values: list[str]) -> str:
 def _schema_v2_factors() -> dict[str, str]:
     """Collect optional SMBIOS/peripheral identities through CIM.
 
-    WMIC is deprecated, so the v2-only data deliberately uses PowerShell's
+    The v2-only data deliberately uses PowerShell's
     CIM cmdlets. A missing cmdlet, permission, or device simply omits the
     signal; collectors must never turn an optional identity into a failure.
     """
@@ -135,6 +171,8 @@ def collect() -> dict[str, str]:
     hardware_id = _reg_value(r"SYSTEM\CurrentControlSet\Control\SystemInformation", "ComputerHardwareId")
     if hardware_id:
         factors["product_uuid"] = str(hardware_id).strip("{}")
+    if system_uuid := _system_uuid():
+        factors["system_uuid"] = system_uuid
 
     board = _reg_value(r"HARDWARE\DESCRIPTION\System\BIOS", "BaseBoardSerialNumber")
     if board is not None:
@@ -184,14 +222,6 @@ def collect() -> dict[str, str]:
                 blobs.append(bytes(value).hex())
     if joined := _multi_instance(blobs):
         factors["monitor_edid"] = joined
-
-    serials = [
-        line.strip()
-        for line in _run(["wmic", "diskdrive", "get", "SerialNumber"]).splitlines()
-        if line.strip() and line.strip().lower() != "serialnumber"
-    ]
-    if joined := _multi_instance(serials):
-        factors["disk_serial"] = joined
 
     if total := _ram_total():
         factors["ram_total"] = total

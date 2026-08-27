@@ -164,18 +164,21 @@ def threshold(n: int, m: int) -> int:
 # ── normalization ───────────────────────────────────────────────────
 
 _PLACEHOLDERS = {
-    "",
-    "none",
-    "unknown",
-    "default string",
-    "to be filled by o.e.m.",
-    "not specified",
-    "system serial number",
+    "", "0", "none", "unknown", "default", "default string", "to be filled by o.e.m.",
+    "not specified", "not available", "not applicable", "not present", "n/a", "na", "null",
+    "system serial number", "asset tag", "no asset tag", "123456789", "0123456789", "example",
+}
+
+_IDENTIFIER_FACTORS = {
+    "machine_guid", "product_uuid", "system_uuid", "board_serial", "system_serial", "chassis_serial",
+    "disk_serial", "volume_id", "tpm_ek", "memory_modules", "nic_identity", "battery_serial", "monitor_edid",
 }
 
 
 def normalize(name: str, raw: str) -> str:
-    value = raw.replace("\x00", "").strip().lower()
+    # ASCII-only folding is deliberate: Unicode hardware text must stay
+    # byte-stable across native and managed implementations.
+    value = raw.replace("\x00", "").strip().translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
     if name in ("mac", "nic_identity"):
         value = value.replace(":", "").replace("-", "")
     return value
@@ -185,11 +188,44 @@ def is_missing(value: str) -> bool:
     return value.strip() in _PLACEHOLDERS
 
 
+def _is_hex(value: str) -> bool:
+    return all(char in "0123456789abcdefABCDEF" for char in value)
+
+
+def _is_degenerate_identifier(value: str) -> bool:
+    compact = "".join(char for char in value if char.isascii() and char.isalnum())
+    return len(compact) >= 4 and (all(char == "0" for char in compact) or all(char == "f" for char in compact))
+
+
+def _is_uuid_like(value: str) -> bool:
+    valid_length = len(value) == 32 or (len(value) == 36 and all(value[index] == "-" for index in (8, 13, 18, 23)))
+    compact = value.replace("-", "")
+    return valid_length and len(compact) == 32 and _is_hex(compact) and not _is_degenerate_identifier(compact) and compact != "12345678123412341234123456789abc"
+
+
+def is_sane_factor(name: str, value: str) -> bool:
+    if not value or len(value.encode("utf-8")) > 4096 or is_missing(value):
+        return False
+    if name == "ram_total":
+        return value.isascii() and value.isdecimal() and int(value) >= 128 * 1024 * 1024
+    if name in ("machine_guid", "product_uuid", "system_uuid"):
+        return _is_uuid_like(value)
+    if name == "slstore":
+        return len(value) == 64 and _is_hex(value) and not _is_degenerate_identifier(value)
+    if name == "tpm_ek":
+        return len(value) == 64 and _is_hex(value)
+    if name in ("mac", "nic_identity"):
+        return all(len(part) == 12 and _is_hex(part) and not _is_degenerate_identifier(part) for part in value.split("|"))
+    if name in _IDENTIFIER_FACTORS:
+        return all(not is_missing(part) and not _is_degenerate_identifier(part) for part in value.split("|"))
+    return True
+
+
 def normalize_factors(raw: dict[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for name, value in raw.items():
         nv = normalize(name, value)
-        if nv and not is_missing(nv):
+        if is_sane_factor(name, nv):
             out[name] = nv
     return out
 
@@ -341,6 +377,10 @@ class Helper:
 
 def parse_helper(blob: bytes) -> Helper:
     corrupt = CorruptHelperError
+    # This is writable local state: cap it before hashing/parsing so a corrupt
+    # store cannot turn recovery into an allocation or combinatorics attack.
+    if len(blob) > 4096:
+        raise corrupt("slhwid: stored helper data is corrupt: oversized")
     if len(blob) < 8 + 4 + 8 + 32 + 32:
         raise corrupt("slhwid: stored helper data is corrupt: truncated")
     if blob[:8] != HELPER_MAGIC:
@@ -348,7 +388,7 @@ def parse_helper(blob: bytes) -> Helper:
     if not ct_equal(hashlib.sha256(blob[:-32]).digest(), blob[-32:]):
         raise corrupt("slhwid: stored helper data is corrupt: integrity mismatch")
     payload_len = struct.unpack_from("<I", blob, 8)[0]
-    if 12 + payload_len + 64 != len(blob):
+    if payload_len < 8 or payload_len > 4096 or 12 + payload_len + 64 != len(blob):
         raise corrupt("slhwid: stored helper data is corrupt: length mismatch")
     body = blob[12 : 12 + payload_len]
     cw = blob[12 + payload_len : 12 + payload_len + 32]
@@ -356,10 +396,22 @@ def parse_helper(blob: bytes) -> Helper:
         raise corrupt(f"slhwid: stored helper data is corrupt: unsupported version {body[0]}")
     if body[1] not in (LEGACY_NORM_VERSION, CURRENT_NORM_VERSION):
         raise corrupt(f"slhwid: stored helper data is corrupt: unsupported factor schema {body[1]}")
+    if body[6] != 0 or body[7] != 0:
+        raise corrupt("slhwid: stored helper data is corrupt: reserved header bits set")
+    allowed = set(_LEGACY_FACTOR_NAMES if body[1] == LEGACY_NORM_VERSION else (
+        *_CURRENT_DIRECT_FACTOR_NAMES, *(name for name, _ in _CURRENT_FACTOR_GROUPS)
+    ))
     n = body[3]
+    mandatory_header = body[4]
     helper = Helper(body[1], body[2], body[5], [], cw)
+    if n == 0 or n > len(allowed):
+        raise corrupt("slhwid: stored helper data is corrupt: invalid slot count")
+    if helper.threshold == 0 or helper.threshold > n or mandatory_header == 0 or mandatory_header >= helper.threshold:
+        raise corrupt("slhwid: stored helper data is corrupt: invalid threshold")
     rest = body[8:]
     seen: set[str] = set()
+    previous = ""
+    mandatory_count = 0
     for _ in range(n):
         if len(rest) < 1:
             raise corrupt("slhwid: stored helper data is corrupt: slot truncated")
@@ -367,10 +419,17 @@ def parse_helper(blob: bytes) -> Helper:
         if name_len == 0 or len(rest) < 1 + name_len + 1 + 32:
             raise corrupt("slhwid: stored helper data is corrupt: slot truncated")
         name = rest[1 : 1 + name_len].decode("ascii")
-        if name in seen:
-            raise corrupt(f"slhwid: stored helper data is corrupt: duplicate slot {name!r}")
+        if name not in allowed:
+            raise corrupt(f"slhwid: stored helper data is corrupt: invalid slot {name!r}")
+        if name in seen or (previous and previous >= name):
+            raise corrupt(f"slhwid: stored helper data is corrupt: duplicate or unsorted slot {name!r}")
         seen.add(name)
-        mandatory = bool(rest[1 + name_len] & 1)
+        previous = name
+        flags = rest[1 + name_len]
+        if flags not in (0, 1):
+            raise corrupt("slhwid: stored helper data is corrupt: invalid slot flags")
+        mandatory = flags == 1
+        mandatory_count += mandatory
         share = struct.unpack_from("<4Q", rest, 2 + name_len)
         if any(limb >= P for limb in share):
             raise corrupt("slhwid: stored helper data is corrupt: share limb out of range")
@@ -378,6 +437,10 @@ def parse_helper(blob: bytes) -> Helper:
         rest = rest[2 + name_len + 32 :]
     if rest:
         raise corrupt("slhwid: stored helper data is corrupt: trailing bytes")
+    if mandatory_count != mandatory_header:
+        raise corrupt("slhwid: stored helper data is corrupt: mandatory count mismatch")
+    if not any(slot.name == "slstore" and slot.mandatory for slot in helper.slots):
+        raise corrupt("slhwid: stored helper data is corrupt: mandatory slstore missing")
     return helper
 
 

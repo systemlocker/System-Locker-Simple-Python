@@ -222,6 +222,7 @@ if sys.platform == "win32":
 
         def __init__(self) -> None:
             self._lock_dir = _local_lock_directory()
+            self._selected_root = None
 
         @contextmanager
         def lock(self):
@@ -253,34 +254,63 @@ if sys.platform == "win32":
             except OSError:
                 return False
 
+        def _select_root(self, helper_name: str = ""):
+            """Pin a helper and its mandatory secret to one hive.
+
+            A pair is one generation. Prefer complete HKLM, then complete
+            HKCU; partial data is useful only as an explicit corrupt/missing
+            generation, never as permission to cross-read the other hive.
+            """
+            if self._selected_root is not None:
+                return self._selected_root
+            lm_helper = self._read(*_HKLM_SOFTWARE_SYSTEMLOCKER, helper_name) if helper_name else None
+            cu_helper = self._read(*_HKCU_SOFTWARE_SYSTEMLOCKER, helper_name) if helper_name else None
+            lm_store = self._read(*_HKLM_SOFTWARE_SYSTEMLOCKER, "SLStore")
+            cu_store = self._read(*_HKCU_SOFTWARE_SYSTEMLOCKER, "SLStore")
+            if lm_helper is not None and lm_store is not None or (not helper_name and lm_store is not None):
+                self._selected_root = _HKLM_SOFTWARE_SYSTEMLOCKER
+            elif cu_helper is not None and cu_store is not None or (not helper_name and cu_store is not None):
+                self._selected_root = _HKCU_SOFTWARE_SYSTEMLOCKER
+            elif lm_helper is not None or lm_store is not None:
+                self._selected_root = _HKLM_SOFTWARE_SYSTEMLOCKER
+            elif cu_helper is not None or cu_store is not None:
+                self._selected_root = _HKCU_SOFTWARE_SYSTEMLOCKER
+            return self._selected_root
+
+        def _write_selected(self, name: str, data: bytes) -> None:
+            root = self._select_root()
+            if root is not None and self._write(*root, name, data):
+                return
+            for candidate in (_HKLM_SOFTWARE_SYSTEMLOCKER, _HKCU_SOFTWARE_SYSTEMLOCKER):
+                if self._write(*candidate, name, data):
+                    self._selected_root = candidate
+                    return
+            raise OSError("slhwid: registry write failed")
+
         def read_slstore(self) -> bytes | None:
-            for root, path in (_HKLM_SOFTWARE_SYSTEMLOCKER, _HKCU_SOFTWARE_SYSTEMLOCKER):
-                data = self._read(root, path, "SLStore")
+            root = self._select_root()
+            if root is not None:
+                data = self._read(*root, "SLStore")
                 if data is not None:
                     return _unwrap_slstore(data)
             return None
 
         def write_slstore(self, value: bytes) -> None:
             blob = SLSTORE_PREFIX + value
-            if not self._write(*_HKLM_SOFTWARE_SYSTEMLOCKER, "SLStore", blob) and not self._write(
-                *_HKCU_SOFTWARE_SYSTEMLOCKER, "SLStore", blob
-            ):
-                raise OSError("slhwid: registry write failed")
+            self._write_selected("SLStore", blob)
 
         def read_helper(self, helper_id: str) -> tuple[bytes, bool]:
             name = f"HWID-{helper_id}"
-            for root, path in (_HKLM_SOFTWARE_SYSTEMLOCKER, _HKCU_SOFTWARE_SYSTEMLOCKER):
-                blob = self._read(root, path, name)
+            root = self._select_root(name)
+            if root is not None:
+                blob = self._read(*root, name)
                 if blob is not None:
                     return blob, True
             return b"", False
 
         def write_helper(self, helper_id: str, blob: bytes) -> None:
             name = f"HWID-{helper_id}"
-            if not self._write(*_HKLM_SOFTWARE_SYSTEMLOCKER, name, blob) and not self._write(
-                *_HKCU_SOFTWARE_SYSTEMLOCKER, name, blob
-            ):
-                raise OSError("slhwid: registry write failed")
+            self._write_selected(name, blob)
 
 
 def default_store(override: str = "") -> _Store:
