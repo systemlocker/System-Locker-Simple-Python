@@ -32,7 +32,7 @@ class Config:
     request_timeout_seconds: float = 15.0
     base_url: str = "https://systemlocker.net"
     invisible_folder_base_url: str = "https://invisiblefolder.net"
-    user_agent: str = "systemlocker-simple-python/1.0.0"
+    user_agent: str = "systemlocker-simple-python/1.1.0"
     program_digest: str | None = None
     invisible_folder_api_key: str | None = None
     api_key: str | None = None

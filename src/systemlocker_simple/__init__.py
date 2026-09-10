@@ -29,7 +29,7 @@ from .invisible_folder import (
 from .sso import GOOGLE_SSO_PORTAL, google_sso_url
 from .transport import HTTPClient, HTTPResponse
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "Client",

@@ -495,7 +495,10 @@ def _find_recovering_subset(mandatory, optional, t: int, cw: bytes):
     found_names = set()
     for combo in combinations(range(len(optional)), need):
         points = mandatory + [optional[i] for i in combo]
-        if found is None and ct_equal(check_word(_key_from_points(points)), cw):
+        # Keep doing the cryptographic work after the first match; skipping
+        # the remaining combinations would leak the matching subset's position.
+        matches = ct_equal(check_word(_key_from_points(points)), cw)
+        if matches and found is None:
             found = points
             found_names = {names[i] for i in combo}
     if found is None:
@@ -574,7 +577,8 @@ def recover_core(blob: bytes, factors: dict[str, str]) -> RecoverResult:
             merged = mandatory + optional
             mand2 = [p for p in merged if p[2] != ms.name and _is_mandatory(helper, p[2])]
             opt2 = [p for p in merged if p[2] != ms.name and not _is_mandatory(helper, p[2])]
-            if culprit == "" and _find_recovering_subset(mand2, opt2, t, helper.check_word) is not None:
+            recovers = _find_recovering_subset(mand2, opt2, t, helper.check_word) is not None
+            if recovers and culprit == "":
                 culprit = ms.name
         if culprit:
             result.reason = "mandatory"
@@ -601,10 +605,11 @@ def recover_core(blob: bytes, factors: dict[str, str]) -> RecoverResult:
             continue
         xq = derive_x(slot.name, value, helper.salt)
         xs = [p[0] for p in points]
-        on_curve = all(
-            _evaluate_at(xs, [p[1][limb] for p in points], xq) == slot.share[limb]
-            for limb in range(4)
-        )
+        # Constant work: `&` (not `and`) so every limb is evaluated and
+        # timing does not reveal which limb first disagreed.
+        on_curve = True
+        for limb in range(4):
+            on_curve = on_curve & (_evaluate_at(xs, [p[1][limb] for p in points], xq) == slot.share[limb])
         (live if on_curve else dead).append(slot.name)
     result.ok = True
     result.key = k

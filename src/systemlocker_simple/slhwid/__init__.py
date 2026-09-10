@@ -220,15 +220,28 @@ def _prepare_locked(options: Options, source, store, raw_factors: dict[str, str]
         if result.reason == "corrupt":
             raise CorruptHelperError("slhwid: stored helper data is corrupt; re-enroll to recover")
         raise DriftError(result.present, result.needed, result.missing, result.reason == "mandatory")
-    session = Session(result.hwid, False, result.dead, result.pending)
-    session._key = result.key
-    session._draw = Draw(source)
     # A recovered v1 helper is deliberately re-shared as v2 only on Commit,
     # after authentication accepted its unchanged HWID.
-    session._factors = project_factors(raw_factors, CURRENT_NORM_VERSION)
+    current_factors = project_factors(raw_factors, CURRENT_NORM_VERSION)
     # Do not let one application weaken hard locks selected by the application
     # that enrolled the shared device helper.
-    session._mandatory = map_mandatory_to_current(slot.name for slot in helper.slots if slot.mandatory)
+    stored_mandatory = map_mandatory_to_current(slot.name for slot in helper.slots if slot.mandatory)
+    additional = map_mandatory_to_current(requested_mandatory) - stored_mandatory
+    # Promoting an enrolled optional slot must not absorb a change to it.
+    # Newly available slots are bound after authorization by Commit.
+    changed = map_mandatory_to_current(result.dead)
+    unavailable = sorted(name for name in additional if not current_factors.get(name) or name in changed)
+    if unavailable:
+        present = sum(1 for slot in helper.slots if recovery_factors.get(slot.name))
+        raise DriftError(present, helper.threshold, unavailable, True)
+    stored_mandatory |= additional
+    if additional and len(stored_mandatory) >= len(current_factors):
+        raise SsError("slhwid: mandatory slots must be fewer than total factors")
+    session = Session(result.hwid, False, result.dead, result.pending or bool(additional))
+    session._key = result.key
+    session._draw = Draw(source)
+    session._factors = current_factors
+    session._mandatory = stored_mandatory
     session._store = store
     session._expected_helper = bytes(blob)
     return session
