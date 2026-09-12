@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "systemlocker-simple"
-version = "1.1.0"
+version = "1.2.0"
 description = "Official System Locker Simple client for Python — stateless license checks over POST /auth, for software on machines you control."
 readme = "README.md"
 requires-python = ">=3.10"

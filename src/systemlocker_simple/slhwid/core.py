@@ -225,6 +225,11 @@ def normalize_factors(raw: dict[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for name, value in raw.items():
         nv = normalize(name, value)
+        if name == "memory_modules" and len(nv.encode("utf-8")) <= 4096:
+            # A module with an OEM placeholder must not erase the usable RAM
+            # serials beside it. Preserve order and duplicates so previously
+            # accepted inventories keep exactly the same enrolled value.
+            nv = "|".join(part for part in nv.split("|") if is_sane_factor(name, part))
         if is_sane_factor(name, nv):
             out[name] = nv
     return out

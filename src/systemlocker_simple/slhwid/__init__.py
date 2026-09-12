@@ -102,7 +102,7 @@ class Session:
 
     @property
     def pending_refresh(self) -> bool:
-        """Whether any slot was dead (commit will re-center)."""
+        """Whether drift, newly available factors, or added hard locks need a refresh."""
         return self._pending
 
     def commit(self) -> None:
@@ -237,7 +237,13 @@ def _prepare_locked(options: Options, source, store, raw_factors: dict[str, str]
     stored_mandatory |= additional
     if additional and len(stored_mandatory) >= len(current_factors):
         raise SsError("slhwid: mandatory slots must be fewer than total factors")
-    session = Session(result.hwid, False, result.dead, result.pending or bool(additional))
+    # A newly readable optional source also needs a post-authorization
+    # refresh, even if every previously enrolled share still matches.
+    enrolled_slots = {slot.name for slot in helper.slots}
+    added_factors = helper.norm_version == CURRENT_NORM_VERSION and any(
+        name not in enrolled_slots for name in current_factors
+    )
+    session = Session(result.hwid, False, result.dead, result.pending or bool(additional) or added_factors)
     session._key = result.key
     session._draw = Draw(source)
     session._factors = current_factors

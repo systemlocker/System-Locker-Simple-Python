@@ -25,7 +25,7 @@ class HTTPResponse:
 class HTTPClient:
     """Override ``post_form``/``get`` (or the whole class) to inject a fake."""
 
-    def __init__(self, timeout_seconds: float = 15.0, user_agent: str = "systemlocker-simple-python/1.1.0") -> None:
+    def __init__(self, timeout_seconds: float = 15.0, user_agent: str = "systemlocker-simple-python/1.2.0") -> None:
         self.timeout_seconds = timeout_seconds
         self.user_agent = user_agent
 
