@@ -1,4 +1,4 @@
-"""Pure cryptographic core of the §4A secret-sharing HWID module.
+"""Pure cryptographic core of the fault-tolerant secret-sharing HWID module.
 
 Implements GF(2^61-1) arithmetic, four-limb secret sharing, x-derivation,
 helper-blob serialization, recovery and refresh. Everything here is pure and
@@ -17,7 +17,8 @@ from itertools import combinations
 P = (1 << 61) - 1
 
 LEGACY_NORM_VERSION = 1
-CURRENT_NORM_VERSION = 2
+V2_NORM_VERSION = 2
+CURRENT_NORM_VERSION = 3
 
 # A conservative physical-machine floor is nine current-schema slots;
 # requiring one fewer tolerates one unavailable collector. Revisit this when
@@ -171,7 +172,8 @@ _PLACEHOLDERS = {
 
 _IDENTIFIER_FACTORS = {
     "machine_guid", "product_uuid", "system_uuid", "board_serial", "system_serial", "chassis_serial",
-    "disk_serial", "volume_id", "tpm_ek", "memory_modules", "nic_identity", "battery_serial", "monitor_edid",
+    "disk_serial", "fixed_disk_serial", "volume_id", "tpm_ek", "memory_modules", "nic_identity",
+    "battery_serial", "monitor_edid",
 }
 
 
@@ -232,7 +234,42 @@ def normalize_factors(raw: dict[str, str]) -> dict[str, str]:
             nv = "|".join(part for part in nv.split("|") if is_sane_factor(name, part))
         if is_sane_factor(name, nv):
             out[name] = nv
+    # Derived, never collected: a supplied value is always replaced.
+    out.pop("edid_digests", None)
+    if "monitor_edid" in raw:
+        digests = _edid_digests(normalize("monitor_edid", raw["monitor_edid"]))
+        if digests and is_sane_factor("edid_digests", digests):
+            out["edid_digests"] = digests
     return out
+
+
+def _edid_digests(normalized: str) -> str:
+    """Schema v3's display signal: one SHA-256 per usable monitor_edid member.
+
+    Windows keeps the EDID of every monitor ever attached, and the hex
+    inventory regularly exceeds the 4096-byte factor limit; the digests stay
+    small. They are derived before that limit drops monitor_edid.
+    """
+    if len(normalized.encode("utf-8")) > 1024 * 1024:
+        return ""  # bound the hashing work on untrusted input
+    digests = sorted(
+        hashlib.sha256(part.encode("utf-8")).hexdigest()
+        for part in normalized.split("|")
+        if not is_missing(part) and not _is_degenerate_identifier(part)
+    )
+    return "|".join(digests)
+
+
+_ASCII_WHITESPACE = " \t\n\v\f\r"
+
+
+def join_instances(values) -> str:
+    """The canonical multi-instance form shared by every implementation.
+
+    Each member is trimmed of ASCII whitespace, empty members are dropped,
+    and the rest are sorted by code point and joined with "|".
+    """
+    return "|".join(sorted(v for v in (str(value).strip(_ASCII_WHITESPACE) for value in values) if v))
 
 
 _LEGACY_FACTOR_NAMES = (
@@ -240,16 +277,35 @@ _LEGACY_FACTOR_NAMES = (
     "ram_total", "volume_id", "computer_name", "firmware", "gpu_id", "monitor_edid", "os_build",
 )
 
-_CURRENT_DIRECT_FACTOR_NAMES = (
+# Schema v2 is historical compatibility code: v2 helpers recover with it.
+_V2_DIRECT_FACTOR_NAMES = (
     "slstore", "machine_guid", "cpu_id", "disk_serial", "ram_total", "volume_id", "firmware",
+    "tpm_ek", "memory_modules", "nic_identity", "battery_serial",
+)
+
+_V2_FACTOR_GROUPS = (
+    ("platform_identity", ("system_uuid", "board_serial", "system_serial", "chassis_serial")),
+    ("display_group", ("gpu_id", "monitor_edid")),
+    ("software_environment", ("computer_name", "os_build")),
+)
+
+# Schema v3: fixed_disk_serial leaves out removable, USB and image-backed
+# disks, and display_group uses per-monitor EDID digests.
+_CURRENT_DIRECT_FACTOR_NAMES = (
+    "slstore", "machine_guid", "cpu_id", "fixed_disk_serial", "ram_total", "volume_id", "firmware",
     "tpm_ek", "memory_modules", "nic_identity", "battery_serial",
 )
 
 _CURRENT_FACTOR_GROUPS = (
     ("platform_identity", ("system_uuid", "board_serial", "system_serial", "chassis_serial")),
-    ("display_group", ("gpu_id", "monitor_edid")),
+    ("display_group", ("gpu_id", "edid_digests")),
     ("software_environment", ("computer_name", "os_build")),
 )
+
+_GROUPED_SCHEMAS = {
+    V2_NORM_VERSION: (_V2_DIRECT_FACTOR_NAMES, _V2_FACTOR_GROUPS),
+    CURRENT_NORM_VERSION: (_CURRENT_DIRECT_FACTOR_NAMES, _CURRENT_FACTOR_GROUPS),
+}
 
 
 def _group_value(name: str, members: tuple[str, ...], raw: dict[str, str]) -> str:
@@ -278,10 +334,11 @@ def project_factors(raw: dict[str, str], norm_version: int) -> dict[str, str]:
     """
     if norm_version == LEGACY_NORM_VERSION:
         return {name: raw[name] for name in _LEGACY_FACTOR_NAMES if raw.get(name)}
-    if norm_version != CURRENT_NORM_VERSION:
+    if norm_version not in _GROUPED_SCHEMAS:
         raise SsError(f"slhwid: unsupported factor schema {norm_version}")
-    out = {name: raw[name] for name in _CURRENT_DIRECT_FACTOR_NAMES if raw.get(name)}
-    for name, members in _CURRENT_FACTOR_GROUPS:
+    direct_names, groups = _GROUPED_SCHEMAS[norm_version]
+    out = {name: raw[name] for name in direct_names if raw.get(name)}
+    for name, members in groups:
         value = _group_value(name, members, raw)
         if value:
             out[name] = value
@@ -291,12 +348,14 @@ def project_factors(raw: dict[str, str], norm_version: int) -> dict[str, str]:
 def current_mandatory_name(name: str) -> str:
     if name in ("product_uuid", "board_serial", "system_uuid", "system_serial", "chassis_serial"):
         return "platform_identity"
-    if name in ("gpu_id", "monitor_edid"):
+    if name in ("gpu_id", "monitor_edid", "edid_digests"):
         return "display_group"
     if name in ("computer_name", "os_build"):
         return "software_environment"
     if name == "mac":
         return "nic_identity"
+    if name == "disk_serial":
+        return "fixed_disk_serial"
     return name
 
 
@@ -399,12 +458,12 @@ def parse_helper(blob: bytes) -> Helper:
     cw = blob[12 + payload_len : 12 + payload_len + 32]
     if body[0] != 1:
         raise corrupt(f"slhwid: stored helper data is corrupt: unsupported version {body[0]}")
-    if body[1] not in (LEGACY_NORM_VERSION, CURRENT_NORM_VERSION):
+    if body[1] not in (LEGACY_NORM_VERSION, V2_NORM_VERSION, CURRENT_NORM_VERSION):
         raise corrupt(f"slhwid: stored helper data is corrupt: unsupported factor schema {body[1]}")
     if body[6] != 0 or body[7] != 0:
         raise corrupt("slhwid: stored helper data is corrupt: reserved header bits set")
     allowed = set(_LEGACY_FACTOR_NAMES if body[1] == LEGACY_NORM_VERSION else (
-        *_CURRENT_DIRECT_FACTOR_NAMES, *(name for name, _ in _CURRENT_FACTOR_GROUPS)
+        *_GROUPED_SCHEMAS[body[1]][0], *(name for name, _ in _GROUPED_SCHEMAS[body[1]][1])
     ))
     n = body[3]
     mandatory_header = body[4]

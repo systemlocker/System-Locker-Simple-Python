@@ -61,8 +61,9 @@ def _process_is_alive(pid: int | None) -> bool:
             # the lock. Any other failure means the PID no longer exists.
             return ctypes.get_last_error() == 5
         try:
-            exit_code = ctypes.c_ulong()
-            return not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) or exit_code.value == 259
+            # SYNCHRONIZE allows waiting, not querying an exit code.
+            kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+            return kernel32.WaitForSingleObject(ctypes.c_void_p(handle), 0) != 0  # WAIT_OBJECT_0: exited
         finally:
             kernel32.CloseHandle(handle)
     try:
@@ -75,19 +76,21 @@ def _process_is_alive(pid: int | None) -> bool:
 
 
 def _remove_if_unchanged(path: str, expected: str) -> None:
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            contents = handle.read()
-    except OSError:
-        # A concurrent release or recovery needs no further action.
-        pass
-        return
-    try:
-        if contents == expected:
+    # On Windows, deleting fails while another process is reading the marker.
+    # Giving up would leave a marker that names a live process, so retry
+    # briefly; the contents check stops if another process replaced it.
+    for _ in range(20):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                contents = handle.read()
+            if contents != expected:
+                return
             os.unlink(path)
-    except OSError:
-        # A concurrent release or recovery needs no further action.
-        pass
+            return
+        except FileNotFoundError:
+            return  # a concurrent release or recovery needs no further action
+        except OSError:
+            time.sleep(0.01)
 
 
 def _acquire_lock(directory: str):
@@ -95,6 +98,7 @@ def _acquire_lock(directory: str):
     path = os.path.join(directory, _LOCK_FILE)
     contents = f"{_LOCK_HEADER}\n{os.getpid()}\n{secrets.token_hex(16)}\n"
     deadline = time.monotonic() + _LOCK_WAIT_SECONDS
+    denied_attempts = 0
     while True:
         try:
             descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -107,7 +111,11 @@ def _acquire_lock(directory: str):
             if existing and existing[0] is not None:
                 expected, pid = existing
                 stale = pid is not None and not _process_is_alive(pid)
-                if pid is None:
+                if not stale:
+                    # A live-looking PID can belong to an unrelated process
+                    # after PID reuse, or to a holder that failed to delete
+                    # its marker. Holders keep it for milliseconds, so an old
+                    # marker is abandoned either way.
                     try:
                         stale = time.time() - os.path.getmtime(path) >= _UNKNOWN_LOCK_GRACE_SECONDS
                     except OSError:
@@ -115,6 +123,15 @@ def _acquire_lock(directory: str):
                 if stale:
                     _remove_if_unchanged(path, expected)
                     continue
+        except PermissionError as error:
+            # Windows reports a marker that another process is deleting as
+            # "access denied" instead of "exists". That state lasts
+            # milliseconds; a persistent denial is a real permission error.
+            denied_attempts += 1
+            if denied_attempts > 20:
+                raise OSError(f"slhwid: cannot acquire storage lock: {error}") from error
+            time.sleep(0.01)
+            continue
         except OSError as error:
             raise OSError(f"slhwid: cannot acquire storage lock: {error}") from error
         if time.monotonic() >= deadline:
@@ -217,6 +234,9 @@ if sys.platform == "win32":
         r"SOFTWARE\SystemLocker",
     )
 
+    def _well_formed_slstore(data: bytes | None) -> bool:
+        return data is not None and len(data) == len(SLSTORE_PREFIX) + 32 and data.startswith(SLSTORE_PREFIX)
+
     class RegistryStore(_Store):
         """REG_BINARY values under HKLM, falling back to HKCU on denial."""
 
@@ -267,9 +287,20 @@ if sys.platform == "win32":
             cu_helper = self._read(*_HKCU_SOFTWARE_SYSTEMLOCKER, helper_name) if helper_name else None
             lm_store = self._read(*_HKLM_SOFTWARE_SYSTEMLOCKER, "SLStore")
             cu_store = self._read(*_HKCU_SOFTWARE_SYSTEMLOCKER, "SLStore")
-            if lm_helper is not None and lm_store is not None or (not helper_name and lm_store is not None):
+            # Only a well-formed secret completes a generation: a malformed
+            # HKLM secret that a non-elevated force_reenroll could not
+            # overwrite must not outrank the replacement it wrote to HKCU.
+            lm_valid = _well_formed_slstore(lm_store)
+            cu_valid = _well_formed_slstore(cu_store)
+            # A user hive holding the machine's own secret is a per-user copy
+            # of the machine generation (same key and HWID) written by a
+            # process that cannot update HKLM. This user can keep it fresh.
+            mirror = lm_valid and cu_valid and lm_store == cu_store
+            if mirror and (not helper_name or lm_helper is not None and cu_helper is not None):
+                self._selected_root = _HKCU_SOFTWARE_SYSTEMLOCKER
+            elif lm_helper is not None and lm_valid or (not helper_name and lm_valid):
                 self._selected_root = _HKLM_SOFTWARE_SYSTEMLOCKER
-            elif cu_helper is not None and cu_store is not None or (not helper_name and cu_store is not None):
+            elif cu_helper is not None and cu_valid or (not helper_name and cu_valid):
                 self._selected_root = _HKCU_SOFTWARE_SYSTEMLOCKER
             elif lm_helper is not None or lm_store is not None:
                 self._selected_root = _HKLM_SOFTWARE_SYSTEMLOCKER
@@ -281,6 +312,17 @@ if sys.platform == "win32":
             root = self._select_root()
             if root is not None and self._write(*root, name, data):
                 return
+            if root == _HKLM_SOFTWARE_SYSTEMLOCKER:
+                # A non-elevated process cannot update an HKLM generation that
+                # an elevated one created. Continue in HKCU instead of never
+                # absorbing drift again: copying the machine secret first
+                # makes the user hive a complete mirror with the same key.
+                secret = None if name == "SLStore" else self._read(*_HKLM_SOFTWARE_SYSTEMLOCKER, "SLStore")
+                if (name == "SLStore" or secret is not None and self._write(*_HKCU_SOFTWARE_SYSTEMLOCKER, "SLStore", secret)) \
+                        and self._write(*_HKCU_SOFTWARE_SYSTEMLOCKER, name, data):
+                    self._selected_root = _HKCU_SOFTWARE_SYSTEMLOCKER
+                    return
+                raise OSError("slhwid: registry write failed")
             for candidate in (_HKLM_SOFTWARE_SYSTEMLOCKER, _HKCU_SOFTWARE_SYSTEMLOCKER):
                 if self._write(*candidate, name, data):
                     self._selected_root = candidate
@@ -322,8 +364,10 @@ def default_store(override: str = "") -> _Store:
     if sys.platform == "darwin":
         directory = os.path.join(home, "Library", "Application Support", "SystemLocker")
     else:
+        # An empty XDG_DATA_HOME means "unset"; joining it would place the
+        # store relative to the working directory.
         directory = os.path.join(
-            os.environ.get("XDG_DATA_HOME", os.path.join(home, ".local", "share")),
+            os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share"),
             "systemlocker",
         )
     return DirStore(directory)

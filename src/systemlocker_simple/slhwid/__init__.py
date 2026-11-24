@@ -187,7 +187,7 @@ def _prepare_locked(options: Options, source, store, raw_factors: dict[str, str]
 
     if not found or options.force_reenroll:
         if not raw_factors.get("slstore"):
-            raw_factors["slstore"] = _ensure_slstore(store, source)
+            raw_factors["slstore"] = _ensure_slstore(store, source, options.force_reenroll)
         factors = project_factors(raw_factors, CURRENT_NORM_VERSION)
         mandatory = map_mandatory_to_current(requested_mandatory)
         for name in sorted(mandatory):
@@ -262,12 +262,24 @@ def _store_lock(store):
     return lock()
 
 
-def _ensure_slstore(store, source) -> str:
-    value = store.read_slstore()
-    if value is not None:
-        if len(value) != 32:
-            raise CorruptHelperError("slhwid: store secret has the wrong size")
+def _ensure_slstore(store, source, force_reenroll: bool = False) -> str:
+    """Return the store secret, creating it on first enrollment.
+
+    Only runs on the enrollment path (no helper, or force_reenroll). A
+    malformed secret is never replaced implicitly, but an explicit
+    force_reenroll discards it with the rest of the device state; refusing
+    that too would leave no recovery path short of deleting the store by hand.
+    """
+    try:
+        value = store.read_slstore()
+    except CorruptHelperError:
+        if not force_reenroll:
+            raise
+        value = None
+    if value is not None and len(value) == 32:
         return value.hex()
+    if value is not None and not force_reenroll:
+        raise CorruptHelperError("slhwid: store secret has the wrong size")
     value = source(32)
     if len(value) != 32:
         raise SsError("slhwid: randomness failed")

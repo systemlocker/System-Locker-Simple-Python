@@ -23,9 +23,9 @@ class HTTPResponse:
 
 
 class HTTPClient:
-    """Override ``post_form``/``get`` (or the whole class) to inject a fake."""
+    """Override ``post_form``/``get``/``request_json`` (or the whole class) to inject a fake."""
 
-    def __init__(self, timeout_seconds: float = 15.0, user_agent: str = "systemlocker-simple-python/1.2.0") -> None:
+    def __init__(self, timeout_seconds: float = 15.0, user_agent: str = "systemlocker-simple-python/2.0.0") -> None:
         self.timeout_seconds = timeout_seconds
         self.user_agent = user_agent
 
@@ -35,7 +35,14 @@ class HTTPClient:
     def get(self, url: str, headers: Mapping[str, str] | None = None) -> HTTPResponse:
         return self._execute("GET", url, headers=headers)
 
-    def _execute(self, method: str, url: str, form: Mapping[str, str | Sequence[str]] | None = None, headers: Mapping[str, str] | None = None) -> HTTPResponse:
+    def request_json(self, method: str, url: str, data=None, headers=None) -> HTTPResponse:
+        """Send a Management API request; ``data`` (when not None) is the JSON body.
+
+        Authentication keeps using form-encoded ``post_form``.
+        """
+        return self._execute(method, url, headers=headers, json_body=data)
+
+    def _execute(self, method: str, url: str, form: Mapping[str, str | Sequence[str]] | None = None, headers: Mapping[str, str] | None = None, json_body=None) -> HTTPResponse:
         from urllib.parse import urlencode
         from urllib.request import Request, build_opener, HTTPRedirectHandler
         from urllib.error import HTTPError
@@ -54,6 +61,10 @@ class HTTPClient:
             data = urlencode(pairs).encode("utf-8")
             request_headers["Content-Type"] = "application/x-www-form-urlencoded"
 
+        if json_body is not None:
+            import json
+            data = json.dumps(json_body).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
         request = Request(url, data=data, headers=request_headers, method=method)
 
         class NoRedirect(HTTPRedirectHandler):

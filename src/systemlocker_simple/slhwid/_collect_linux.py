@@ -1,4 +1,4 @@
-"""Linux §4A.1 factor collection: the legacy slots reuse the shared hwid
+"""Linux SL-HWID factor collection: the legacy slots reuse the shared hwid
 collectors and the extended slots come from procfs, os-release, findmnt, and
 DRM EDID files."""
 
@@ -10,6 +10,9 @@ import os
 import re
 import subprocess
 import sys
+
+
+from .core import join_instances  # noqa: E402  (shared multi-instance form)
 
 
 def _run(command: list[str]) -> str:
@@ -33,7 +36,7 @@ def _read(path: str, binary: bool = False):
 
 
 def _multi_instance(values: list[str]) -> str:
-    return "|".join(sorted(value for value in values if value))
+    return join_instances(values)
 
 
 def collect() -> dict[str, str]:
@@ -111,6 +114,21 @@ def collect() -> dict[str, str]:
         factors["os_build"] = match.group(1)
 
     blobs = []
+    # Schema v3 fixed disks: every block device with a serial that is neither
+    # marked removable nor attached through USB. NVMe/SCSI expose
+    # device/serial; virtio exposes serial on the block device itself.
+    fixed_disks = []
+    for block in sorted(glob.glob("/sys/block/*")):
+        if (_read(os.path.join(block, "removable")) or "") == "1":
+            continue
+        if "/usb" in os.path.realpath(block):
+            continue
+        serial = _read(os.path.join(block, "device", "serial")) or _read(os.path.join(block, "serial"))
+        if serial:
+            fixed_disks.append(serial)
+    if joined := _multi_instance(fixed_disks):
+        factors["fixed_disk_serial"] = joined
+
     for path in sorted(glob.glob("/sys/class/drm/card*-*/edid")):
         try:
             data = open(path, "rb").read()
@@ -119,7 +137,7 @@ def collect() -> dict[str, str]:
         if data:
             blobs.append(data.hex())
     if blobs:
-        factors["monitor_edid"] = "|".join(sorted(blobs))
+        factors["monitor_edid"] = _multi_instance(blobs)
 
     gpus = []
     for class_path in sorted(glob.glob("/sys/bus/pci/devices/*/class")):
@@ -137,6 +155,6 @@ def collect() -> dict[str, str]:
             continue
         gpus.append(f"{vendor}:{device}")
     if gpus:
-        factors["gpu_id"] = "|".join(sorted(gpus))
+        factors["gpu_id"] = _multi_instance(gpus)
 
     return factors

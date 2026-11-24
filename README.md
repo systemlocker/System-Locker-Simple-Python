@@ -63,9 +63,31 @@ count = client.management().redeemed_user_count()
 keys = client.management().generate_keys(EXPIRY_ONE_MONTH, 10, "june-batch")
 ```
 
-Wraps `POST /api/v1`: key status/expiration, HWID resets (single/admin or
-whole-system), key generation, bans, expiry adjustment. Keep the API key on
-servers you control.
+Management uses the Management API v2 (`/api/v2`). Set `api_key` to a
+scoped `slm_…` bearer credential created for this system, and keep it on
+servers you control. Authentication does not use it.
+
+`permissions()` lists the credential's scopes, and `request(method, path, data)` calls any v2
+resource path, such as `/systems/{systemId}/nightflyer`, returning
+the response's decoded `data`. The server enforces each credential's scopes.
+A non-2xx response raises a `SimpleError` whose `reason` is the server's error code, such as `INSUFFICIENT_SCOPE`.
+
+| Helper | Scope |
+| --- | --- |
+| User count (refreshed periodically by the server) | `systems.read` |
+| Key status (`user`, `mikros` or `unclaimed`) and expiry | `keys.read` |
+| Key generation (duration presets start at redemption; one key per line) | `keys.create` |
+| Administrative HWID resets and `add_time(license_key, seconds)` | `keys.update` |
+| Key deletion | `keys.delete` |
+
+Mutation helpers return the response's JSON data as text. A key with no
+fixed expiry is reported as permanent only once redeemed: an unredeemed
+duration key has no expiry timestamp yet either.
+
+**Upgrading from the previous management API:** `reset_hwid(license_key)` no longer takes an `as_admin` argument; self-service resets
+stay on `Client.reset_hwid_for_key`. `adjust_expiry` has been removed because there is no
+equivalent v2 operation — use `add_time(license_key, seconds)` to extend a key instead.
+Custom HTTP clients must also implement `request_json(method, url, data, headers)` to use management; form-only clients keep working for authentication.
 
 ## Google SSO (account authentication)
 

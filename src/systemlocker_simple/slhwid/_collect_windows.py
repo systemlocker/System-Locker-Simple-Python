@@ -1,4 +1,4 @@
-"""Windows §4A.1 factor collection: native registry reads, environment,
+"""Windows SL-HWID factor collection: native registry reads, environment,
 ctypes for firmware, volume, and memory details, plus CIM enrichment. Every
 source degrades gracefully — a missing source just leaves the slot absent,
 which the threshold scheme absorbs."""
@@ -49,7 +49,9 @@ def _run(command: list[str], timeout: float = 4.0) -> str:
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            # The CIM script emits UTF-8; the locale code page would garble it.
+            encoding="utf-8",
+            errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         stdout, _ = process.communicate(timeout=timeout)
@@ -128,9 +130,11 @@ def _system_uuid() -> str:
     return ""
 
 
+from .core import join_instances  # noqa: E402  (shared multi-instance form)
+
+
 def _multi_instance(values: list[str]) -> str:
-    cleaned = sorted(v for v in values if v)
-    return "|".join(cleaned)
+    return join_instances(values)
 
 
 def _schema_v2_factors() -> dict[str, str]:
@@ -141,6 +145,9 @@ def _schema_v2_factors() -> dict[str, str]:
     signal; collectors must never turn an optional identity into a failure.
     """
     script = (
+        # UTF-8 output keeps non-ASCII hardware strings identical to the
+        # other implementations, which set the same encoding.
+        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$OutputEncoding=[Console]::OutputEncoding;"
         "$ErrorActionPreference='SilentlyContinue';"
         "function Emit($n,$v){$c=@($v|?{$_ -ne $null -and ([string]$_).Trim().Length -gt 0}|"
         "%{([string]$_).Trim()}|sort);if($c.Count -gt 0){Write-Output ($n+'='+($c -join '|'))}};"
@@ -148,8 +155,18 @@ def _schema_v2_factors() -> dict[str, str]:
         "Emit 'system_serial' $p.IdentifyingNumber;"
         "Emit 'chassis_serial' (Get-CimInstance Win32_SystemEnclosure).SerialNumber;"
         "Emit 'disk_serial' (Get-CimInstance Win32_DiskDrive).SerialNumber;"
+        # Schema v3 fixed disks leave out USB (7), SD (12), MMC (13) and
+        # mounted images (15), as Windows' STORAGE_BUS_TYPE numbers them.
+        "Emit 'fixed_disk_serial' (Get-CimInstance -Namespace root/Microsoft/Windows/Storage MSFT_PhysicalDisk|"
+        "?{$_.BusType -notin 7,12,13,15}).SerialNumber;"
         "Emit 'memory_modules' (Get-CimInstance Win32_PhysicalMemory).SerialNumber;"
-        "Emit 'nic_identity' (Get-CimInstance Win32_NetworkAdapter|?{$_.PhysicalAdapter}).PermanentAddress;"
+        # Win32_NetworkAdapter.PermanentAddress is normally empty. It stays
+        # first so any value it did provide keeps its enrolled form;
+        # MSFT_NetAdapter supplies it otherwise.
+        "$n=@((Get-CimInstance Win32_NetworkAdapter|?{$_.PhysicalAdapter}).PermanentAddress|?{$_});"
+        "if($n.Count -eq 0){$n=(Get-CimInstance -Namespace root/StandardCimv2 MSFT_NetAdapter|"
+        "?{$_.ConnectorPresent -and -not $_.Virtual}).PermanentAddress};"
+        "Emit 'nic_identity' $n;"
         "Emit 'battery_serial' (Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData).SerialNumber;"
         "$ek=Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256;if($ek.IsPresent){Emit 'tpm_ek' $ek.PublicKeyHash}"
     )

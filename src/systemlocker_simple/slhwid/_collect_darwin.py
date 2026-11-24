@@ -1,4 +1,4 @@
-"""macOS §4A.1 factor collection through the system command-line tools.
+"""macOS SL-HWID factor collection through the system command-line tools.
 Every source degrades gracefully; slow tools (system_profiler) run under a
 hard timeout and simply leave their slot absent when they miss it."""
 
@@ -7,6 +7,9 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+
+
+from .core import join_instances  # noqa: E402  (shared multi-instance form)
 
 
 def _run(command: list[str], timeout: float = 3.0) -> str:
@@ -51,7 +54,7 @@ def collect() -> dict[str, str]:
     if value := _first(r"ether\s+([0-9a-fA-F:]{17})", _run(["ifconfig", "en0"])):
         factors["mac"] = value
     if values := _all(r"Ethernet Address:\s*([0-9a-fA-F:]{17})", _run(["networksetup", "-listallhardwareports"])):
-        factors["nic_identity"] = "|".join(sorted(values))
+        factors["nic_identity"] = join_instances(values)
 
     if total := _run(["sysctl", "-n", "hw.memsize"]).strip():
         factors["ram_total"] = total
@@ -72,7 +75,7 @@ def collect() -> dict[str, str]:
 
     memory = _run(["system_profiler", "SPMemoryDataType", "-json"], timeout=5.0)
     if serials := _all(r'"[^"]*serial[^"]*"\s*:\s*"([^"]+)"', memory):
-        factors["memory_modules"] = "|".join(sorted(serials))
+        factors["memory_modules"] = join_instances(serials)
 
     battery = _run(["ioreg", "-r", "-c", "AppleSmartBattery"])
     if value := _first(r'"BatterySerialNumber"\s*=\s*"([^"]+)"', battery):
@@ -82,15 +85,21 @@ def collect() -> dict[str, str]:
 
     displays = _run(["system_profiler", "SPDisplaysDataType", "-json"], timeout=5.0)
     if models := _all(r'"spdisplays_model"\s*:\s*"([^"]+)"', displays):
-        factors["gpu_id"] = "|".join(sorted(models))
+        factors["gpu_id"] = join_instances(models)
 
+    # Schema v3 fixed disks: only internal NVMe/SATA buses are listed here;
+    # USB storage appears under SPUSBDataType instead.
+    fixed = _all(r'"device_serial"\s*:\s*"([^"]+)"',
+                 _run(["system_profiler", "SPNVMeDataType", "SPSerialATADataType", "-json"], timeout=5.0))
+    if joined := join_instances(fixed):
+        factors["fixed_disk_serial"] = joined
     storage = _run(["system_profiler", "SPStorageDataType", "-json"], timeout=5.0)
     if serials := _all(r'"[a-z_]*serial[a-z_]*"\s*:\s*"([^"]+)"', storage):
-        factors["disk_serial"] = "|".join(sorted(serials))
+        factors["disk_serial"] = join_instances(serials)
 
     displays_io = _run(["ioreg", "-r", "-c", "IODisplayConnect"])
     if blobs := _all(r'"IODisplayEDID"\s*=\s*<?([0-9a-fA-F]+)>?', displays_io):
-        factors["monitor_edid"] = "|".join(sorted(b.lower() for b in blobs))
+        factors["monitor_edid"] = join_instances(b.lower() for b in blobs)
 
     version = _run(["sw_vers", "-productVersion"]).strip()
     build = _run(["sw_vers", "-buildVersion"]).strip()
